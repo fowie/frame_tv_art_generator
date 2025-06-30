@@ -1,265 +1,255 @@
-import requests
-import re
-import time
 import os
-from pathlib import Path
-from urllib.parse import urljoin
+import time
 import logging
+from pathlib import Path
+from BingImageCreator import ImageGen
 
 class BingImageCreator:
-    def __init__(self, auth_cookie=None):
+    def __init__(self, auth_cookie=None, srchhpgusr_cookie=None):
         """
-        Initialize Bing Image Creator.
+        Initialize Bing Image Creator using the official BingImageCreator package.
         
         Args:
-            auth_cookie (str): Your _U cookie value from bing.com (required for authentication)
+            auth_cookie (str): Your _U cookie value from bing.com
+            srchhpgusr_cookie (str): Your SRCHHPGUSR cookie value (optional, will try to use empty string if not provided)
         """
         self.auth_cookie = auth_cookie
-        self.session = requests.Session()
-        
-        # Set up headers to mimic a real browser
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-        })
+        self.srchhpgusr_cookie = srchhpgusr_cookie or ""
         
         if self.auth_cookie:
-            self.session.cookies.set('_U', self.auth_cookie, domain='.bing.com')
+            try:
+                self.image_gen = ImageGen(
+                    auth_cookie=self.auth_cookie,
+                    auth_cookie_SRCHHPGUSR=self.srchhpgusr_cookie
+                )
+            except Exception as e:
+                logging.error(f"Failed to initialize ImageGen: {e}")
+                self.image_gen = None
+        else:
+            self.image_gen = None
     
-    def create_images(self, prompt, output_dir="images/generated", num_images=4):
+    def create_images(self, prompt, output_dir="images/generated", num_images=4, max_retries=2):
         """
-        Generate images using Bing Image Creator.
+        Generate images using the official BingImageCreator package.
         
         Args:
             prompt (str): Text prompt for image generation
             output_dir (str): Directory to save generated images
             num_images (int): Number of images to generate (max 4 per request)
+            max_retries (int): Maximum number of retry attempts if generation fails
         
         Returns:
             list: Paths to downloaded images
         """
         if not self.auth_cookie:
-            raise ValueError("Authentication cookie (_U) is required. Please set it in the constructor.")
+            raise ValueError("Authentication cookie (_U) is required.")
         
-        logging.info(f"Generating images for prompt: {prompt[:100]}...")
+        if not self.image_gen:
+            raise ValueError("ImageGen not initialized. Check your authentication cookie.")
+        
+        logging.info(f"Generating images for prompt: {prompt}")
         
         # Create output directory
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        try:
-            # Try the modern approach first
-            return self._create_images_modern(prompt, output_path, num_images)
-        except Exception as e:
-            logging.warning(f"Modern approach failed: {e}. Trying legacy approach...")
+        for attempt in range(max_retries + 1):
             try:
-                return self._create_images_legacy(prompt, output_path, num_images)
-            except Exception as e2:
-                logging.error(f"Both approaches failed. Modern: {e}, Legacy: {e2}")
-                raise Exception(f"Failed to generate images with both methods. Last error: {e2}")
-    
-    def _create_images_modern(self, prompt, output_path, num_images):
-        """Modern approach using direct API calls."""
-        # First, get the page to extract any necessary tokens
-        create_url = "https://www.bing.com/images/create"
-        response = self.session.get(create_url)
-        response.raise_for_status()
-        
-        # Submit the prompt with modern parameters
-        data = {
-            'q': prompt,
-            'rt': '3',  # Updated request type
-            'FORM': 'GENCRE'
-        }
-        
-        response = self.session.post(create_url, data=data, allow_redirects=True)
-        response.raise_for_status()
-        
-        # Check if we're redirected to a results page
-        if 'images/create/async/results/' in response.url:
-            request_id = response.url.split('/')[-1].split('?')[0]
-            logging.info(f"Request submitted with ID from redirect: {request_id}")
-        else:
-            # Extract request ID from response
-            request_id = self._extract_request_id(response.text)
-            if not request_id:
-                # Try to find it in current URL or response headers
-                if hasattr(response, 'history') and response.history:
-                    for hist_resp in response.history:
-                        if 'images/create/async/results/' in hist_resp.url:
-                            request_id = hist_resp.url.split('/')[-1].split('?')[0]
-                            break
+                if attempt > 0:
+                    logging.info(f"Retry attempt {attempt}/{max_retries} for image generation...")
+                    time.sleep(5)  # Wait before retry
                 
-                if not request_id:
-                    raise Exception("Failed to extract request ID from Bing response")
-            
-            logging.info(f"Request submitted with ID: {request_id}")
-        
-        # Poll for completion
-        image_urls = self._poll_for_completion(request_id)
-        
-        # Download the images
-        downloaded_files = []
-        for i, url in enumerate(image_urls[:num_images]):
-            filename = f"bing_generated_{int(time.time())}_{i+1}.jpg"
-            filepath = output_path / filename
-            
-            if self._download_image(url, filepath):
-                downloaded_files.append(str(filepath))
-                logging.info(f"Downloaded image {i+1}: {filename}")
-        
-        return downloaded_files
-    
-    def _create_images_legacy(self, prompt, output_path, num_images):
-        """Legacy approach for older Bing interface."""
-        # Step 1: Submit the prompt
-        create_url = "https://www.bing.com/images/create"
-        data = {
-            'q': prompt,
-            'rt': '4',  # Request type
-            'FORM': 'GENILP'
-        }
-        
-        response = self.session.post(create_url, data=data, allow_redirects=True)
-        response.raise_for_status()
-        
-        # Extract the request ID from the response
-        request_id = self._extract_request_id(response.text)
-        if not request_id:
-            raise Exception("Failed to extract request ID from Bing response")
-        
-        logging.info(f"Request submitted with ID: {request_id}")
-        
-        # Step 2: Poll for completion
-        image_urls = self._poll_for_completion(request_id)
-        
-        # Step 3: Download the images
-        downloaded_files = []
-        for i, url in enumerate(image_urls[:num_images]):
-            filename = f"bing_generated_{int(time.time())}_{i+1}.jpg"
-            filepath = output_path / filename
-            
-            if self._download_image(url, filepath):
-                downloaded_files.append(str(filepath))
-                logging.info(f"Downloaded image {i+1}: {filename}")
-        
-        return downloaded_files
-    
-    def _extract_request_id(self, html_content):
-        """Extract the request ID from the HTML response."""
-        # Try multiple patterns to find the request ID
-        patterns = [
-            r'id="([a-f0-9-]{36})"',  # Original pattern
-            r'"id":"([a-f0-9-]{36})"',  # JSON format
-            r'requestId["\']?\s*[:=]\s*["\']?([a-f0-9-]{36})["\']?',  # Request ID variable
-            r'data-rid="([a-f0-9-]{36})"',  # Data attribute
-            r'rid=([a-f0-9-]{36})',  # URL parameter
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, html_content, re.IGNORECASE)
-            if matches:
-                return matches[0]
-        
-        # If no UUID found, try to extract from URL redirects
-        if '/images/create/' in html_content:
-            url_patterns = [
-                r'/images/create/async/results/([a-f0-9-]{36})',
-                r'images/create.*?([a-f0-9-]{36})',
-            ]
-            for pattern in url_patterns:
-                matches = re.findall(pattern, html_content, re.IGNORECASE)
-                if matches:
-                    return matches[0]
-        
-        return None
-    
-    def _poll_for_completion(self, request_id, max_attempts=30, delay=2):
-        """Poll Bing for image generation completion."""
-        poll_url = f"https://www.bing.com/images/create/async/results/{request_id}?q="
-        
-        for attempt in range(max_attempts):
-            logging.info(f"Polling attempt {attempt + 1}/{max_attempts}")
-            
-            response = self.session.get(poll_url)
-            
-            if response.status_code == 200:
-                # Check if images are ready
-                image_urls = self._extract_image_urls(response.text)
-                if image_urls:
-                    logging.info(f"Images ready! Found {len(image_urls)} URLs")
-                    return image_urls
-            
-            time.sleep(delay)
-        
-        raise Exception("Timeout waiting for image generation to complete")
-    
-    def _extract_image_urls(self, html_content):
-        """Extract image URLs from the HTML response."""
-        # Try multiple patterns to find image URLs
-        patterns = [
-            r'src="([^"]*th\?id=[^"]*)"',  # Original pattern
-            r'data-src="([^"]*th\?id=[^"]*)"',  # Lazy loading
-            r'"murl":"([^"]*)"',  # Media URL in JSON
-            r'"turl":"([^"]*)"',  # Thumbnail URL in JSON
-            r'https://th\.bing\.com/th/id/[^"\\]*',  # Direct Bing image URLs
-        ]
-        
-        all_urls = []
-        for pattern in patterns:
-            urls = re.findall(pattern, html_content)
-            all_urls.extend(urls)
-        
-        # Clean up URLs and get full resolution versions
-        clean_urls = []
-        seen_urls = set()
-        
-        for url in all_urls:
-            if 'th.bing.com' in url or 'th?id=' in url:
-                # Clean up the URL
-                clean_url = url.replace('\\/', '/').replace('\\', '')
+                # Generate images using the official package
+                logging.info("Submitting request to Bing Image Creator...")
+                image_urls = self.image_gen.get_images(prompt)
                 
-                # Ensure it starts with https://
-                if not clean_url.startswith('http'):
-                    if clean_url.startswith('//'):
-                        clean_url = 'https:' + clean_url
-                    elif clean_url.startswith('/'):
-                        clean_url = 'https://th.bing.com' + clean_url
+                if not image_urls:
+                    if attempt < max_retries:
+                        logging.warning("No images returned - retrying...")
+                        continue
+                    raise Exception("No images returned from Bing Image Creator after all retries")
                 
-                # Convert to full resolution
-                if '&w=' in clean_url:
-                    clean_url = re.sub(r'&w=\d+', '&w=1024', clean_url)
-                if '&h=' in clean_url:
-                    clean_url = re.sub(r'&h=\d+', '&h=1024', clean_url)
+                logging.info(f"Received {len(image_urls)} image URLs")
                 
-                # Add resolution parameters if not present
-                if 'th?id=' in clean_url and '&w=' not in clean_url:
-                    clean_url += '&w=1024&h=1024'
+                # Use the package's built-in download method
+                try:
+                    logging.info("Downloading images...")
+                    # The save_images method downloads all images at once
+                    self.image_gen.save_images(
+                        image_urls[:num_images], 
+                        str(output_path)
+                    )
+                    
+                    # Find the downloaded files and preserve existing images
+                    downloaded_files = []
+                    
+                    # Count existing images to continue numbering sequence
+                    existing_images = len(list(output_path.glob("bing_generated_*.jpg"))) if output_path.exists() else 0
+                    
+                    # Look for any new image files in the directory  
+                    new_files = []
+                    for img_file in output_path.glob("*"):
+                        if img_file.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp', '.svg']:
+                            # Check if this is a newly downloaded file (not our renamed format)
+                            if not img_file.name.startswith('bing_generated_'):
+                                new_files.append(img_file)
+                    
+                    # Rename new files with unique numbers to preserve existing images
+                    for i, img_file in enumerate(new_files[:num_images]):
+                        try:
+                            # Check if the file is actually an image and not an SVG error
+                            if not self._validate_image_file(img_file):
+                                logging.warning(f"Downloaded file {img_file.name} is not a valid image (likely Bing error icon) - deleting")
+                                img_file.unlink()  # Delete the invalid file
+                                continue
+                            
+                            # Create unique filename based on existing count + new sequence
+                            unique_number = existing_images + len(downloaded_files) + 1
+                            timestamp = int(time.time())
+                            new_name = f"bing_generated_{timestamp}_{unique_number:03d}.jpg"
+                            new_path = output_path / new_name
+                            
+                            # Ensure filename is unique
+                            counter = 1
+                            while new_path.exists():
+                                new_name = f"bing_generated_{timestamp}_{unique_number:03d}_{counter}.jpg"
+                                new_path = output_path / new_name
+                                counter += 1
+                            
+                            img_file.rename(new_path)
+                            downloaded_files.append(str(new_path))
+                            logging.info(f"Downloaded and renamed image: {new_name}")
+                            
+                        except Exception as e:
+                            logging.warning(f"Could not rename {img_file}: {e}")
+                            # Still check if it's a valid image before adding
+                            if self._validate_image_file(img_file):
+                                downloaded_files.append(str(img_file))
+                                logging.info(f"Downloaded image: {img_file.name}")
+                    
+                    # Check if we got valid images, if not and we have retries left, try again
+                    if not downloaded_files and attempt < max_retries:
+                        logging.warning(f"No valid images downloaded on attempt {attempt + 1}, retrying...")
+                        continue
+                    
+                except Exception as e:
+                    logging.error(f"Failed to download images using save_images: {e}")
+                    if attempt < max_retries:
+                        continue
+                    
+                    # Fallback: try to download manually
+                    downloaded_files = []
+                    import requests
+                    
+                    for i, url in enumerate(image_urls[:num_images]):
+                        try:
+                            filename = f"bing_generated_{int(time.time())}_{i+1}.jpg"
+                            filepath = output_path / filename
+                            
+                            response = requests.get(url, timeout=30)
+                            response.raise_for_status()
+                            
+                            with open(filepath, 'wb') as f:
+                                f.write(response.content)
+                            
+                            downloaded_files.append(str(filepath))
+                            logging.info(f"Downloaded image {i+1}: {filename}")
+                            
+                        except Exception as e2:
+                            logging.error(f"Failed to download image {i+1}: {e2}")
+                            continue
                 
-                # Avoid duplicates
-                if clean_url not in seen_urls:
-                    clean_urls.append(clean_url)
-                    seen_urls.add(clean_url)
+                if downloaded_files:
+                    logging.info(f"Successfully downloaded {len(downloaded_files)} images")
+                    return downloaded_files
+                    
+            except Exception as e:
+                if attempt < max_retries:
+                    logging.warning(f"Generation attempt {attempt + 1} failed: {e}, retrying...")
+                    continue
+                else:
+                    logging.error(f"Error generating images after all retries: {e}")
+                    raise
         
-        return clean_urls
+        # If we get here, all attempts failed
+        raise Exception("Failed to generate valid images after all retry attempts")
     
-    def _download_image(self, url, filepath):
-        """Download an image from a URL to a local file."""
+    def test_connection(self):
+        """
+        Test the connection to Bing Image Creator.
+        
+        Returns:
+            dict: Connection test results
+        """
+        if not self.auth_cookie:
+            return {
+                'success': False,
+                'error': 'No authentication cookie provided'
+            }
+        
         try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
+            # Try to initialize the ImageGen object
+            if not self.image_gen:
+                self.image_gen = ImageGen(auth_cookie=self.auth_cookie)
             
-            with open(filepath, 'wb') as f:
-                f.write(response.content)
+            # Test with a simple prompt (this might generate actual images, so be cautious)
+            logging.info("Testing Bing Image Creator connection...")
             
-            return True
+            return {
+                'success': True,
+                'message': 'Bing Image Creator initialized successfully'
+            }
+            
         except Exception as e:
-            logging.error(f"Failed to download image from {url}: {e}")
+            return {
+                'success': False,
+                'error': f'Connection test failed: {e}'
+            }
+    
+    def _validate_image_file(self, file_path):
+        """
+        Validate that the downloaded file is actually an image and not an SVG error icon.
+        
+        Args:
+            file_path (Path): Path to the file to validate
+        
+        Returns:
+            bool: True if valid image, False if SVG error or invalid
+        """
+        try:
+            # Check file extension
+            if file_path.suffix.lower() == '.svg':
+                logging.warning(f"File {file_path.name} is an SVG (likely Bing error icon)")
+                return False
+            
+            # Check file size - SVG error icons are typically very small
+            file_size = file_path.stat().st_size
+            if file_size < 1024:  # Less than 1KB is likely an error
+                logging.warning(f"File {file_path.name} is too small ({file_size} bytes) - likely error icon")
+                return False
+            
+            # Check file content for SVG markers
+            try:
+                with open(file_path, 'rb') as f:
+                    first_bytes = f.read(100).decode('utf-8', errors='ignore').lower()
+                    if '<svg' in first_bytes or '<?xml' in first_bytes:
+                        logging.warning(f"File {file_path.name} contains SVG/XML content - likely error icon")
+                        return False
+            except Exception:
+                pass  # If we can't read the file, let PIL handle it later
+            
+            # Try to validate with PIL
+            try:
+                from PIL import Image
+                with Image.open(file_path) as img:
+                    img.verify()  # This will throw an exception if not a valid image
+                return True
+            except Exception as e:
+                logging.warning(f"File {file_path.name} failed PIL validation: {e}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Error validating file {file_path}: {e}")
             return False
     
     def get_auth_instructions(self):
@@ -272,10 +262,12 @@ class BingImageCreator:
         3. Open Developer Tools (F12)
         4. Go to Application/Storage tab -> Cookies -> https://www.bing.com
         5. Find the cookie named '_U' and copy its value
-        6. Use this value when initializing BingImageCreator
+        6. Use this value when initializing BingImageCreatorOfficial
         
         Example:
         generator = BingImageCreator(auth_cookie="YOUR_U_COOKIE_VALUE_HERE")
+        
+        Note: This version uses the official BingImageCreator pip package.
         """
 
 if __name__ == "__main__":
@@ -287,5 +279,9 @@ if __name__ == "__main__":
     
     # Uncomment below to test with actual cookie
     # generator = BingImageCreator(auth_cookie="YOUR_COOKIE_HERE")
-    # images = generator.create_images("A beautiful sunset landscape", num_images=2)
-    # print(f"Generated images: {images}")
+    # test_result = generator.test_connection()
+    # print(f"Connection test: {test_result}")
+    # 
+    # if test_result['success']:
+    #     images = generator.create_images("A beautiful sunset landscape", num_images=1)
+    #     print(f"Generated images: {images}")

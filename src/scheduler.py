@@ -7,7 +7,7 @@ import time
 from typing import List, Dict, Any
 
 from prompt_builder import PromptBuilder
-from bing_generator_official import BingImageCreatorOfficial
+from bing_generator import BingImageCreator
 from image_processor import ImageProcessor
 from frame_tv_api import SamsungFrameTVAPI
 
@@ -96,7 +96,7 @@ class FrameTVArtScheduler:
             if not bing_cookie:
                 raise ValueError("Bing authentication cookie is required")
             
-            self.bing_generator = BingImageCreatorOfficial(auth_cookie=bing_cookie)
+            self.bing_generator = BingImageCreator(auth_cookie=bing_cookie)
             generated_images = []
             
             for i, prompt in enumerate(prompts):
@@ -334,7 +334,7 @@ class FrameTVArtScheduler:
         # Test 2: Bing Generator (if cookie provided)
         if bing_cookie:
             try:
-                self.bing_generator = BingImageCreatorOfficial(auth_cookie=bing_cookie)
+                self.bing_generator = BingImageCreator(auth_cookie=bing_cookie)
                 test_results['bing_generator'] = {
                     'success': True,
                     'message': 'Authentication configured'
