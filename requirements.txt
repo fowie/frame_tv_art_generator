@@ -1,0 +1,15 @@
+# Frame TV Art Generator - Python Dependencies
+
+# Core dependencies
+requests>=2.31.0
+Pillow>=10.0.0
+pathlib
+BingImageCreator
+setuptools
+
+# Optional dependencies for enhanced features
+schedule>=1.2.0
+
+# Development/testing dependencies (optional)
+pytest>=7.4.0
+black>=23.0.0
